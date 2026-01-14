@@ -1,0 +1,10 @@
+# envs/tools.yaml
+name: rna_seq_tools
+channels:
+  - bioconda
+  - conda-forge
+dependencies:
+  - star=2.7.10b
+  - subread=2.0.8          # includes featureCounts
+  - fastqc=0.12.1
+  - fastp=0.23.4

@@ -1,0 +1,125 @@
+import glob
+import os
+from pathlib import Path
+
+# Working paths (update these to match your system)
+RAW_DIR = "raw_data"
+TRIM_DIR = "trim"
+FASTQC_DIR = "fastqc"
+ALIGN_DIR = "alignment"
+COUNT_DIR = "featurecounts"
+
+# --- Auto-detect samples from raw_data --
+R1_FILES = glob.glob(f"{RAW_DIR}/*_L001_R1_001.fastq.gz")
+if not R1_FILES:
+    raise ValueError(f"No R1 files found in {RAW_DIR} matching pattern *_L001_R1_001.fastq.gz")
+
+SAMPLES = [os.path.basename(f).replace("_L001_R1_001.fastq.gz", "") for f in R1_FILES]
+print("Detected samples:", SAMPLES)
+
+# Reference paths (update these to match your system)
+GENOME_DIR = "/path/to/your/star/genome/index"
+GTF_FILE = "/path/to/your/genome/gtf"
+
+# Ensure output directories exist (optional but helpful)
+for d in [TRIM_DIR, FASTQC_DIR, ALIGN_DIR, COUNT_DIR]:
+    os.makedirs(d, exist_ok=True)
+
+# --- Rules ---
+
+rule all:
+    input:
+        # Raw FastQC
+        expand(fastqc + "/{sample}_L001_R1_001_fastqc.html", sample=SAMPLES),
+        expand(fastqc + "/{sample}_L001_R2_001_fastqc.html", sample=SAMPLES),
+        # Trimmed FastQC
+        expand(fastqc + "/{sample}_L001_R1_001.trimmed_fastqc.html", sample=SAMPLES),
+        expand(fastqc + "/{sample}_L001_R2_001.trimmed_fastqc.html", sample=SAMPLES),
+        # Alignment BAMs
+        expand(alignment + "/{sample}_starAligned.sortedByCoord.out.bam", sample=SAMPLES),
+        # Counts
+        expand(featurecounts + "/{sample}_counts.txt", sample=SAMPLES)
+
+# FastQC on raw reads
+rule fastqc_raw:
+    input:
+        r1 = RAW_DIR + "/{sample}_L001_R1_001.fastq.gz",
+        r2 = RAW_DIR + "/{sample}_L001_R2_001.fastq.gz"
+    output:
+        html_r1 = FASTQC_DIR + "/{sample}_L001_R1_001_fastqc.html",
+        zip_r1  = FASTQC_DIR + "/{sample}_L001_R1_001_fastqc.zip",
+        html_r2 = FASTQC_DIR + "/{sample}_L001_R2_001_fastqc.html",
+        zip_r2  = FASTQC_DIR + "/{sample}_L001_R2_001_fastqc.zip"
+    threads: 16
+    shell:
+        "fastqc -o {FASTQC_DIR} -t {threads} {input.r1} {input.r2}"
+
+# Trimming with fastp
+rule trim:
+    input:
+        r1 = RAW_DIR + "/{sample}_L001_R1_001.fastq.gz",
+        r2 = RAW_DIR + "/{sample}_L001_R2_001.fastq.gz"
+    output:
+        r1_trim = TRIM_DIR + "/{sample}_L001_R1_001.trimmed.fastq.gz",
+        r2_trim = TRIM_DIR + "/{sample}_L001_R2_001.trimmed.fastq.gz",
+        html = TRIM_DIR + "/{sample}.fastq.html",
+        log  = TRIM_DIR + "/{sample}.fastq.log"
+    threads: 16
+    shell:
+        "fastp "
+        "--in1 {input.r1} --in2 {input.r2} "
+        "--out1 {output.r1_trim} --out2 {output.r2_trim} "
+        "-w {threads} -q 15 -u 40 -n 5 -l 15 "
+        "-h {output.html} &> {output.log}"
+
+# FastQC on trimmed reads
+rule fastqc_trimmed:
+    input:
+        r1 = TRIM_DIR + "/{sample}_L001_R1_001.trimmed.fastq.gz",
+        r2 = TRIM_DIR + "/{sample}_L001_R2_001.trimmed.fastq.gz"
+    output:
+        html_r1 = FASTQC_DIR + "/{sample}_L001_R1_001.trimmed_fastqc.html",
+        zip_r1  = FASTQC_DIR + "/{sample}_L001_R1_001.trimmed_fastqc.zip",
+        html_r2 = FASTQC_DIR + "/{sample}_L001_R2_001.trimmed_fastqc.html",
+        zip_r2  = FASTQC_DIR + "/{sample}_L001_R2_001.trimmed_fastqc.zip"
+    threads: 16
+    shell:
+        "fastqc -o {FASTQC_DIR} -t {threads} {input.r1} {input.r2}"
+
+# STAR alignment
+rule star_align:
+    input:
+        r1 = TRIM_DIR + "/{sample}_L001_R1_001.trimmed.fastq.gz",
+        r2 = TRIM_DIR + "/{sample}_L001_R2_001.trimmed.fastq.gz"
+    output:
+        bam = ALIGN_DIR + "/{sample}_starAligned.sortedByCoord.out.bam",
+        log_final = ALIGN_DIR + "/{sample}_starLog.final.out"  # optional tracking
+    params:
+        prefix = ALIGN_DIR + "/{sample}_star"
+    threads: 16
+    shell:
+        "STAR "
+        "--runThreadN {threads} "
+        "--genomeDir {GENOME_DIR} "
+        "--readFilesIn {input.r1} {input.r2} "
+        "--readFilesCommand zcat "
+        "--twopassMode Basic "
+        "--outFileNamePrefix {params.prefix} "
+        "--outSAMtype BAM SortedByCoordinate "
+        "--outSAMstrandField intronMotif "
+        "--outSAMunmapped Within "
+        "--outReadsUnmapped None"
+
+# featureCounts
+rule featurecounts:
+    input:
+        bam = ALIGN_DIR + "/{sample}_starAligned.sortedByCoord.out.bam"
+    output:
+        counts = COUNT_DIR + "/{sample}_counts.txt",
+        log = COUNT_DIR + "/{sample}_screen-output.log"
+    threads: 16
+    shell:
+        "featureCounts -T {threads} -p --countReadPairs -s 2 "
+        "-t exon -g gene_id "
+        "-a {GTF_FILE} "
+        "-o {output.counts} {input.bam} 2> {output.log}"
